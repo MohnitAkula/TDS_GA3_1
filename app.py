@@ -13,7 +13,7 @@ Env:
   DB_PATH           default ./agent.db
   EVIDENCE_BRACKETS "1" keeps [brackets] in evidenceRefs (default strips them)
 """
-import os, re, json, uuid, hashlib, sqlite3, asyncio
+import os, re, json, uuid, hashlib, sqlite3, asyncio, sys, traceback
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -22,6 +22,7 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
+from starlette.responses import PlainTextResponse
 
 A2A = "application/a2a+json"
 BATCH_MT = "application/vnd.ga5.invoice-claim-batch+json"
@@ -38,6 +39,13 @@ LLM_KEY = os.environ.get("LLM_API_KEY", "")
 LLM_MODEL = os.environ.get("LLM_MODEL", "")
 ALLOWED = {t.strip() for t in os.environ.get("API_TOKENS", "").split(",") if t.strip()}
 KEEP_BRACKETS = os.environ.get("EVIDENCE_BRACKETS", "0") == "1"
+
+print(f"[STARTUP] PUBLIC_BASE_URL={PUBLIC_BASE_URL}", flush=True)
+print(f"[STARTUP] BP={BP}", flush=True)
+print(f"[STARTUP] LLM_BASE={LLM_BASE}", flush=True)
+print(f"[STARTUP] LLM_MODEL={LLM_MODEL}", flush=True)
+print(f"[STARTUP] LLM_KEY={'set' if LLM_KEY else 'EMPTY'}", flush=True)
+sys.stdout.flush()
 
 db = sqlite3.connect(os.environ.get("DB_PATH", "agent.db"), check_same_thread=False, isolation_level=None)
 db.executescript("""
@@ -238,15 +246,21 @@ def find_part(msg, mt):
     return None
 
 async def message_send(request: Request):
+    print(f"[REQ] POST message:send from {request.client.host if request.client else 'unknown'}", flush=True)
     principal, e = guard(request, True)
-    if e: return e
+    if e:
+        print(f"[REQ] message:send guard failed", flush=True)
+        return e
     try:
         body = await request.json()
         msg = body["message"]
-    except Exception:
+    except Exception as exc:
+        print(f"[REQ] message:send parse error: {exc}", flush=True)
         return err(400, "INVALID_ARGUMENT", "Malformed request.")
     if not valid_message(msg):
+        print(f"[REQ] message:send invalid message", flush=True)
         return err(400, "INVALID_ARGUMENT", "Malformed message.")
+    print(f"[REQ] message:send messageId={msg['messageId']} taskId={msg.get('taskId')}", flush=True)
     h = chash(msg)  # message only; configuration ignored
     row = db.execute("SELECT hash,task_id FROM msgs WHERE principal=? AND message_id=?",
                      (principal, msg["messageId"])).fetchone()
@@ -336,6 +350,7 @@ def continuation(principal, msg, h):
     return task_resp(t)
 
 async def task_get(request: Request):
+    print(f"[REQ] GET tasks/{request.path_params.get('task_id','?')}", flush=True)
     principal, e = guard(request, False)
     if e: return e
     t = get_task(request.path_params["task_id"], principal)
@@ -376,9 +391,14 @@ def card():
     }
 
 async def agent_card(request: Request):
+    print(f"[REQ] GET agent-card.json", flush=True)
     return JSONResponse(card(), media_type="application/json")
 
+async def health(request: Request):
+    return PlainTextResponse("ok")
+
 routes = [
+    Route("/health", health, methods=["GET"]),
     Route("/.well-known/agent-card.json", agent_card, methods=["GET"]),
     Route(f"{BP}/message:send", message_send, methods=["POST"]),
     Route(f"{BP}/tasks", task_list, methods=["GET"]),
@@ -386,3 +406,4 @@ routes = [
     Route(f"{BP}/tasks/{{task_id}}", task_get, methods=["GET"]),
 ]
 app = Starlette(routes=routes)
+print(f"[STARTUP] Routes registered, app ready", flush=True)
